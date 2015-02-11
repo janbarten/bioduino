@@ -1,0 +1,192 @@
+#include <Ethernet.h>
+#include <SD.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <RTClib.h>
+#include <RTC_DS3231.h>
+#include <DHT.h>
+
+RTC_DS3231 RTC;
+// setting up ethernet shield
+byte mac[] = {
+  0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED
+};
+IPAddress ip(192, 168, 2, 175);
+EthernetServer server(80);
+
+// setting up DHT22 sensor
+#define DHTPIN 3
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+//defining variables to store data
+volatile unsigned long reading1 = 0; // counter for nesthole activity
+volatile unsigned long reading2 = 0; // reserved for future development
+int licht = 0; // relative light reading
+int beweging = 0; //movement inside the nestbox
+int regenStatus = 0; // rain status
+int minuut = 0; //reserved for future development
+const int chipSelect = 4;
+int logit = 0; // flag to control logging
+                // flag goes from 0 to 1 in the interrupt routine below
+
+void setup()  {
+  Serial.begin(9600);
+  SPI.begin();
+  Wire.begin();
+  RTC.begin();
+  dht.begin();
+  pinMode(2, INPUT_PULLUP);
+  pinMode(4, OUTPUT);
+  pinMode(7, INPUT);
+  digitalWrite(4, HIGH);
+  pinMode(13, OUTPUT);
+  
+  attachInterrupt(0,meting, FALLING); // attaching the interrupt to start counting and logging
+  
+  Wire.beginTransmission(0x68);
+  Wire.write((byte)0);
+  Wire.endTransmission();
+  Wire.requestFrom(0x68, 3);
+  
+  //RTC.adjust(DateTime(__DATE__, __TIME__));
+ 
+  Serial.print("Initializing SD card...");
+  // make sure that the default chip select pin is set to
+  // output, even if you don't use it:
+  pinMode(10, OUTPUT);
+  pinMode(6, INPUT);
+  // see if the card is present and can be initialized:
+  if (!SD.begin(chipSelect)) {
+    Serial.println("Card failed, or not present");
+    // don't do anything more:
+    return;
+  }
+  Serial.println("Card initialized.");
+  
+  Ethernet.begin(mac, ip);
+  server.begin();
+  Serial.print("Server is at ");
+  Serial.println(Ethernet.localIP());
+}
+
+void loop()  {
+  //reading sensors
+  DateTime now = RTC.now();
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+  licht = analogRead(A0);
+  regenStatus = digitalRead (7);
+  beweging = digitalRead (6);
+  
+  delay(2000);
+  EthernetClient client = server.available();
+  if (client) {
+    Serial.println("new client");
+    // an http request ends with a blank line
+    boolean currentLineIsBlank = true;
+    while (client.connected()) {
+      if (client.available()) {
+        char c = client.read();
+        // if you've gotten to the end of the line (received a newline
+        // character) and the line is blank, the http request has ended,
+        // so you can send a reply
+        if (c == '\n' && currentLineIsBlank) {
+          // send a standard http response header
+          client.println("HTTP/1.1 200 OK");
+          client.println("Content-Type: text/html");
+          client.println("Refresh: 5");  // refresh the page automatically every 10 sec
+          client.println();
+          client.println("<!DOCTYPE HTML>");
+          client.println("<html>");
+          client.print("Activiteit vliegopening totaal: ");
+          client.print(reading1);
+          
+          client.println("<br /><br /> ");
+          client.print("Nu activiteit in het nest?: "); //Ne
+          if (beweging == HIGH)  {
+            client.print("Ja");
+          }
+          else  {
+            client.print("Nee");
+          }
+          client.println("<br /><br /br>");
+          client.print("Huidige temperatuur: ");
+          client.print(t);
+          client.println(" C");
+          client.println("<br />");
+          client.print("Huidige luchtvochtigheid: ");
+          client.print(h);
+          client.println(" %");
+          client.println("<br />");
+          client.print("Lichtomstandigheden: ");
+          client.print(licht);
+          client.println("<br /><br /br>");
+          client.println("</html>");
+          break;
+        }
+        if (c == '\n') {
+          // you're starting a new line
+          currentLineIsBlank = true;
+        }
+        else if (c != '\r') {
+          // you've gotten a character on the current line
+          currentLineIsBlank = false;
+        }
+      }
+    }
+    // give the web browser time to receive the data
+    delay(1);
+    // close the connection:
+    client.stop();
+    Serial.println("client disconnected");
+  }
+  //logging control by checking the flag
+  if (logit == 1) {
+    DateTime now = RTC.now();
+    // serial communication for debugging
+    Serial.print(now.day(), DEC);
+    Serial.print('/');
+    Serial.print(now.month(), DEC);
+    Serial.print('/');
+    Serial.print(now.year(), DEC);
+    Serial.print(" ");
+    Serial.print(now.hour(), DEC);
+    Serial.print(":");
+    Serial.print(now.minute(), DEC);
+    Serial.print(":");
+    Serial.print(now.second(), DEC);
+    Serial.println(",");
+    Serial.println(reading1);
+   
+   // logging data
+    File dataFile = SD.open("meetkast.csv", FILE_WRITE);
+    dataFile.print(now.day(), DEC);
+    dataFile.print("/");
+    dataFile.print(now.month(), DEC);
+    dataFile.print("/");
+    dataFile.print(now.year(), DEC);
+    dataFile.print(",");
+    dataFile.print(now.hour(), DEC);
+    dataFile.print(":");
+    dataFile.print(now.minute(), DEC);
+    dataFile.print(",");
+    dataFile.print(reading1);
+    dataFile.print(",");
+    dataFile.print(beweging);
+    dataFile.print(",");
+    dataFile.print(t);
+    dataFile.print(",");
+    dataFile.println(licht);
+    dataFile.close();
+    delay(50); // allowing for soft debouncing the IR-gate
+    logit = 0; // reset the flag for logging
+  } 
+}
+  
+void meting()  {
+  if(logit==0){ //if statement to check if logging data has finished
+  reading1 = reading1 ++;
+  logit = 1; // flag goes high
+  }
+}
